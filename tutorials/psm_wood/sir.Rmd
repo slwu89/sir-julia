@@ -1,0 +1,236 @@
+---
+title: "Partially Specified SIR via Fellner-Schall Iteration"
+author: "Sean L. Wu"
+date: "2022-09-08"
+output: pdf_document
+---
+
+```{r,message=FALSE}
+library(deSolve) # solve ODEs
+library(mgcv) # splines
+library(limSolve) # xsample
+library(MASS) # ginv
+library(numDeriv) # Hessian
+```
+
+## Motivation
+
+We'll work out a SIR model where the true FOI function is given by $I^{\alpha}$, but
+try to estimate it with a partially specified model where the FOI is a monotonic function
+which is constrained to be 0 when the input is 0. We'll use cubic splines to do this.
+
+## Training data
+
+We'll generate training data by sampling from the "true" solution, using a Poisson distribution.
+
+```{r}
+sir <- function(t, y, pars) {
+  with(pars, {
+    dS <- -beta*y[1]*(y[2]^alpha)
+    dI <- beta*y[1]*(y[2]^alpha) - gamma*y[2]
+    dR <- gamma*y[2]
+    return(list(c(dS,dI,dR)))
+  })
+}
+
+N <- 1e3
+params <- list(beta=0.7,gamma=0.25,alpha=0.7)
+u0 <- c(0.99, 0.01, 0)
+tmax <- 40
+dt <- 1
+
+sir_sol <- deSolve::ode(y = u0, times = 0:tmax, func = sir, parms = params)
+
+# training data
+train_time <- 30
+tsdata <- subset(sir_sol, time <= train_time)
+cdata <- diff(-tsdata[, 1])
+noisy_data <- rpois(n = length(cdata), lambda = cdata * N)
+
+plot(x = 1:train_time, y = N * cdata, xlab = "Time", ylab = "Number of new infected", type = 'l')
+points(x = 1:train_time, y = noisy_data, pch = 16, col = 'red')
+```
+
+We'll also show a sample of possible splines that fulfill the constraints (monotonicity, pass through zero at zero). These are expressed as inequality constraints of the form $Ap\geq b$ (enforcing monotonicity) and $Cp = 0$ (enforcing identifiability/pass through zero). These two constraints form a linear subspace, to sample uniformly from it, we use the `xsample` function from "limSolve".
+
+```{r}
+# set up monotonic, non-negative, passes-thru-zero at zero spline to model the FOI
+Igrid <- seq(from = 0, to = 1, by = 0.01)
+foi_spline <- mgcv::smoothCon(s(x,k=10,bs="cr",pc=0),data=data.frame(x=Igrid),knots=NULL)[[1]]
+foi_spline_cons <- mgcv::mono.con(x = foi_spline$xp, upper = -1)
+
+# sample a parameter vector from the feasible space
+p0 <- limSolve::xsample(G = foi_spline_cons$A, H = as.vector(foi_spline_cons$b), E = foi_spline$C, F = 0, iter = 100)
+
+# plot all of the sampled feasible functions against the true FOI function
+plot(
+  x = Igrid,
+  y = params$beta * Igrid^params$alpha,
+  lty = 1, col = 'black', type = 'l', lwd = 2,
+  ylab = 'Force of Infection', xlab = 'Proportion Infectious', ylim = c(0, 1)
+)
+lines(x = Igrid, y = params$beta * Igrid, col = 'grey', lty = 2, lwd = 2)
+for (i in 1:nrow(p0$X)) {
+  lines(
+    x = Igrid,
+    y = mgcv::Predict.matrix(foi_spline,data.frame(x=Igrid))%*%p0$X[i, ],
+    col = adjustcolor('red', 0.2), lty = 2)
+}
+legend(x = 'topleft', pch = c(16,16,16), col = c('black','red','grey'), legend = c('true', 'feasible splines','mass-action'))
+```
+
+## Model fitting
+
+Rather than using PIRLS to optimize a quadratic approximation to the penalized log-likelihood, with an outer loop using GCV to estimate optimal smoothing parameters $\lambda$, we use the method presented in ["A generalized Fellner-Schall method for smoothing parameter optimization with application to Tweedie location, scale and shape models"](https://doi.org/10.1111/biom.12666).
+
+Briefly, the method works for any number of smooths, and any smooth may itself have multiple penalty matrices. The penalized log likelihood is presented in the paper as:
+
+$$
+l(\theta) - \theta^{\top} S_{\lambda} \theta/2 + \log{|S_{\lambda}|_{+}} + c
+$$
+Where $\log{|S_{\lambda}|_{+}}$ is the product of nonzero eigenvalue of that matrix (not used in practice), and $c$ is constant. Using an estimate $\theta^{[k]}$ and a value of $\lambda^{[k]}$, this likelihood can be maximized to get the next update $\theta^{[k+1]}$.
+
+Inference on parameters can be done by recognizing that in the large sample limit we have $\theta|y\sim\mathcal{N}(\hat{\theta},V_{\lambda})$, where $V_{\lambda} = \mathcal{H}_{\lambda}^{-1}$, and $\mathcal{H}_{\lambda}$ is the Hessian of the log-likelihood function with respect to the parameters plus the overall penalty matrix, $\mathcal{H}_{\lambda} =H + S_{\lambda}$.
+
+Updating of the smoothing parameters $\lambda$ can proceed during each iteration, after the likelihood has been optimized to get $\theta^{[k+1]}$, using the update formula:
+
+$$
+\lambda^{[k+1]}_{j} = \left( \frac{ \text{tr}(S_{\lambda}^{-1} S_{j}) - \text{tr}(V_{\lambda}S_{j}) }{\theta^{[k+1]\top} S_{j} \theta^{[k+1]}} \right) \lambda_{j}^{[k]}
+$$
+In all cases we assume that the penalty matrices $S_{j}$ have been padded with zeros so that they have the same dimension as $S_{\lambda}$, the overall sum of penalties. In the above equation, $V_{\lambda}$ must be subset to the submatrix referring specifically to the j-th smooth. In practice the updates are clipped to reasonable sizes. The algorithm can be iterated to convergence.
+
+First we set up the partially specified SIR model, and the penalized negative log likelihood.
+
+```{r}
+# penalty matrix
+S_lambda <- foi_spline$S[[1]]
+
+# evaluate the spline at given coefficients theta, and input proportion infectious I
+foi_spline_eval <- function(I, theta) {
+  as.vector(mgcv::Predict.matrix(foi_spline, data.frame(x=I)) %*% theta)
+}
+
+# SIR as a partially specified model
+sir_psm <- function(t, y, pars, theta) {
+  with(pars, {
+    foi <- foi_spline_eval(I = y[2], theta = theta)
+    dS <- -foi*y[1]
+    dI <- foi*y[1] - gamma*y[2]
+    dR <- gamma*y[2]
+    return(list(c(dS,dI,dR)))
+  })
+}
+
+# compute penalized negative log likelihood (the first val is fixed to zero by the "pass-thru-zero" constraint)
+pnll <- function(thetaw, Sb) {
+  theta <- c(0, thetaw)
+  soln <- deSolve::ode(y = u0, times = 0:train_time, func = sir_psm, parms = params, theta = theta)
+  pred <- abs(diff(-soln[, 2]) * N)
+  ll <- sum(dpois(x = noisy_data, lambda = pred, log = TRUE))
+  ll <- ll - as.vector(t(theta) %*% Sb %*% theta)
+  return(-ll)
+}
+```
+
+Now we can run the Fellner-Schall updating scheme. This is a rough caricature of a proper fitting algorithm, better constraining of parameters should be used and a convergence criterion should be used to terminate. We just run for 25 iterations. It takes quite some time, due to the need to numerically calculate the Hessian each iteration.
+
+Note that because we have used a "pass through zero" constraint in our construction of the spline `s(...,pc=0)` rather than the typical "sum to zero" identifiability constraint, we only need to estimate 9 parameters, as the first must be zero.
+
+```{r}
+theta_k <- p0$X[nrow(p0$X), 2:10]
+lambda <- 10
+
+for (i in 1:25) {
+
+  cat(" --- Fellner-Schall iteration ", i , " --- \n")
+
+  Sb <- S_lambda * lambda
+
+  # get theta^{[k+1]} by minimizing the nll wrt theta and given smoothing parameters
+  theta_k1 <- constrOptim(
+    theta = theta_k, f = pnll, grad = NULL,
+    ui = foi_spline_cons$A[, 2:10], ci = matrix(foi_spline_cons$b),
+    Sb = Sb
+  )
+  theta_k1 <- theta_k1$par
+
+  # evaluate the Hessian at theta^{[k]}
+  H <- hessian(func = pnll, x = theta_k, Sb = S_lambda)
+
+  # fixup if not semi-definite (see paper)
+  eh <- eigen(H)
+  if (any(eh$values<0)) { ## find nearest +ve semi definite
+    eh$values[eh$values<0] <- 0
+    Hp <- eh$vectors %*% (eh$values*t(eh$vectors))
+  }
+  Hp <- Hp + Sb[2:10,2:10]
+
+  # update Lambda (smoothing parameter)
+  Si <- ginv(Sb[2:10,2:10])
+  Vb <- ginv(Hp)
+  update_fac <- ( sum(diag(Si %*% Sb[2:10,2:10])) - sum(diag(Vb %*% Sb[2:10,2:10])) ) / as.vector(t(theta_k1) %*% Sb[2:10,2:10] %*% theta_k1)
+  # clip to reasonable values
+  update_fac <- pmax(update_fac, 0.1)
+  update_fac <- pmin(update_fac, 10)
+
+  lambda <- lambda * update_fac
+
+  # update params
+  theta_k <- theta_k1
+
+}
+```
+
+We can plot the estimated FOI function with approximate 95% confidence intervals based off multivariate normal approximation to posterior distribution:
+
+```{r}
+theta_mle <- c(0, theta_k)
+
+# plot estimated FOI function vs. true function
+Xp <- mgcv::Predict.matrix(foi_spline,data.frame(x=Igrid))
+se <- sqrt(rowSums((Xp[, 2:10] %*% Vb) * Xp[, 2:10]))
+
+fv <- Xp %*% theta_mle
+ul <- fv + 2 * se
+ll <- fv - 2 * se
+
+plot(
+  x = Igrid,
+  y = Xp%*%theta_mle,
+  lty = 2, col = 'red', type = 'l',
+  ylab = 'Force of Infection', xlab = 'Proportion Infectious'
+)
+lines(x = Igrid, y = ul, col = 'red', lty = 3)
+lines(x = Igrid, y = ll, col = 'red', lty = 3)
+lines(x = Igrid, y = params$beta * Igrid^params$alpha, col = adjustcolor('black',alpha.f = 0.5), lty = 1)
+lines(x = Igrid, y = params$beta * Igrid, col = 'grey', lty = 4)
+legend(x = 'topleft', lty = c(1,2,3), col = c(adjustcolor('black',alpha.f = 0.5),'red','grey'), legend = c('true', 'estimated','mass-action'))
+```
+
+And the trajectories from the true and fitted models, showing 95% quantiles from a sample from the approximate posterior.
+
+```{r}
+# plot I traj from optimized solution (red) vs true (black)
+sir_psm_sol <- deSolve::ode(y = u0, times = 0:tmax, func = sir_psm, parms = params, theta = theta_mle)
+
+# approximate 95% CIs for trajectories by sampling from posterior
+theta_posterior <- mvrnorm(n = 500, mu = theta_mle[2:10], Sigma = Vb)
+I_traj_posterior <- lapply(X = 1:nrow(theta_posterior), FUN = function(i) {
+  theta_i <- c(0, theta_posterior[i, ])
+  sir_psm_sol_i <- deSolve::ode(y = u0, times = 0:tmax, func = sir_psm, parms = params, theta = theta_i)
+  sir_psm_sol_i[, 3]
+})
+I_traj_posterior <- do.call(cbind, I_traj_posterior)
+I_traj_posterior_lo <- apply(X = I_traj_posterior, MARGIN = 1, FUN = function(x) {
+  quantile(x = x, probs = 0.025)
+})
+I_traj_posterior_hi <- apply(X = I_traj_posterior, MARGIN = 1, FUN = function(x) {
+  quantile(x = x, probs = 0.975)
+})
+
+plot(x = 0:tmax, y = sir_sol[, 3], type = 'l', col = 'black', xlab = 'Time', ylab = 'Infectious Population')
+lines(x = 0:tmax, y = sir_psm_sol[, 3], type = 'l', col = 'red')
+lines(x = 0:tmax, y = I_traj_posterior_lo, lty = 2, col = 'red')
+lines(x = 0:tmax, y = I_traj_posterior_hi, lty = 2, col = 'red')
+legend(x = 'topright', pch = c(16,16), col = c('black','red'), legend = c('true', 'estimated'))
+```
