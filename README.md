@@ -85,6 +85,10 @@ The above process can be represented in different kinds of ways:
 - [Petri net model to ODEs, SDEs, and jump process using Petri.jl](https://github.com/epirecipes/sir-julia/blob/master/markdown/pn_petri/pn_petri.md)
 - [Petri net model to ODEs, SDEs, and jump process using AlgebraicPetri.jl](https://github.com/epirecipes/sir-julia/blob/master/markdown/pn_algebraicpetri/pn_algebraicpetri.md)
 
+### Stock and flow models
+
+- [Simple stock and flow model to an ODE using StockFlow.jl](https://github.com/epirecipes/sir-julia/blob/master/markdown/ode_stockflow/ode_stockflow.md)
+
 ### Discrete event simulations
 
 - [Discrete event simulation using SimJulia](https://github.com/epirecipes/sir-julia/blob/master/markdown/des/des.md)
@@ -101,8 +105,11 @@ The above process can be represented in different kinds of ways:
 
 ## Optimal control
 
-- [Optimal control of an SIR epidemic using Optimization.jl](https://github.com/epirecipes/sir-julia/blob/master/markdown/ode_lockdown_optimization/ode_lockdown_optimization.md)
-- [Optimal control of an SIR epidemic using InfiniteOpt.jl](https://github.com/epirecipes/sir-julia/blob/master/markdown/ode_lockdown_infiniteopt/ode_lockdown_infiniteopt.md)
+- [Optimal control of an SIR epidemic with non-pharmaceutical interventions using ODEs and Optimization.jl](https://github.com/epirecipes/sir-julia/blob/master/markdown/ode_lockdown_optimization/ode_lockdown_optimization.md)
+- [Optimal control of an SIR epidemic with non-pharmaceutical interventions using ODEs and InfiniteOpt.jl](https://github.com/epirecipes/sir-julia/blob/master/markdown/ode_lockdown_infiniteopt/ode_lockdown_infiniteopt.md)
+- [Optimal control of an SIR epidemic with non-pharmaceutical interventions using a function map and JuMP.jl](https://github.com/epirecipes/sir-julia/blob/master/markdown/ode_lockdown_jump/function_map_lockdown_jump.md)
+- [Optimal control of an SIR epidemic with vaccination using a function map and JuMP.jl](https://github.com/epirecipes/sir-julia/blob/master/markdown/ode_vaccine_jump/function_map_vaccine_jump.md)
+- [Optimal control of an SIR epidemic with non-pharmaceutical interventions using a function map and stochastic dual dynamic programming with SDDP.jl](https://github.com/epirecipes/sir-julia/blob/master/markdown/sddp/sddp.md)
 
 ## Composing models
 
@@ -202,6 +209,7 @@ When solving continuous-time models like ODEs, the discretization can lead to nu
 - Fixed (rather than exponential) distribution of infectious period:
     - [Using a delay differential equation and DelayDiffEq.jl](https://github.com/epirecipes/sir-julia/blob/master/markdown/dde/dde.md)
     - [Using a fixed delay in a jump system, making use of the integrator](https://github.com/epirecipes/sir-julia/blob/master/markdown/jump_process_delay/jump_process_delay.md)
+    - [Using a gamma-distributed delay in a jump system using DelaySSAToolkit.jl](https://github.com/epirecipes/sir-julia/blob/master/markdown/jump_process_delayssatoolkit/jump_process_delayssatoolkit.md)
     - [Using a stochastic delay differential equation in StochasticDelayDiffEq.jl](https://github.com/epirecipes/sir-julia/blob/master/markdown/sdde/sdde.md)
     - [Using a fixed delay in a discrete event simulation using SimJulia (see end of file)](https://github.com/epirecipes/sir-julia/blob/master/markdown/des/des.md)
 - An Erlang distribution for the infectious period using the method of stages:
