@@ -33,3 +33,7 @@ Manifest.toml
 
 # F90 modules
 *.mod
+
+# vscode
+.vscode
+.vscode/*
